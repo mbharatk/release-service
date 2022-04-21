@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 	"github.com/go-logr/logr"
 	"github.com/redhat-appstudio/release-service/api/v1alpha1"
 	"github.com/redhat-appstudio/release-service/tekton"
@@ -67,14 +68,14 @@ func (r *ReleaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 func (r *ReleaseReconciler) triggerReleasePipeline(ctx context.Context, release *v1alpha1.Release) (ctrl.Result, error) {
 	log := r.Log.WithValues()
 
-	releaseLink, err := r.getReleaseLink(ctx, release)
+	userReleaseLink, err := r.getReleaseLink(ctx, release)
 	if err != nil {
 		log.Error(err, "Failed to get ReleaseLink")
 
 		return ctrl.Result{}, nil
 	}
 
-	releaseStrategy, err := r.getReleaseStrategy(ctx, releaseLink)
+	releaseStrategy, err := r.getReleaseStrategy(ctx, userReleaseLink)
 	if err != nil {
 		log.Error(err, "Failed to get ReleaseStrategy")
 
@@ -83,7 +84,7 @@ func (r *ReleaseReconciler) triggerReleasePipeline(ctx context.Context, release 
 
 	log.Info("Triggering release", "ReleaseStrategy", releaseStrategy.Name)
 
-	pipelineRun := tekton.CreatePipelineRunFromReleaseStrategy(releaseStrategy, releaseLink.Spec.Target, release)
+	pipelineRun := tekton.CreatePipelineRunFromReleaseStrategy(releaseStrategy, userReleaseLink.Spec.Target, release)
 	err = r.Create(ctx, pipelineRun)
 	if err != nil {
 		log.Error(err, "Unable to trigger a Release Pipeline", "ReleaseStrategy.Name", releaseStrategy.Name)
@@ -112,12 +113,36 @@ func (r *ReleaseReconciler) getReleaseLink(ctx context.Context, release *v1alpha
 	return releaseLink, nil
 }
 
+// getTargetReleaseLink get a ReleaseLink by following the spec.target field in a given ReleaseLink and ensuring that
+// the target ReleaseLink points back to it.
+func (r *ReleaseReconciler) getTargetReleaseLink(ctx context.Context, releaseLink *v1alpha1.ReleaseLink) (*v1alpha1.ReleaseLink, error) {
+	releaseLinks := &v1alpha1.ReleaseLinkList{}
+	opts := []client.ListOption{
+		client.InNamespace(releaseLink.Spec.Target),
+		client.MatchingFields{"spec.target": releaseLink.Namespace},
+	}
+
+	err := r.List(ctx, releaseLinks, opts...)
+	if err != nil || len(releaseLinks.Items) == 0 {
+		return nil, err
+	}
+
+	return &releaseLinks.Items[0], nil
+}
+
 // getReleaseStrategy loads and returns the ReleaseStrategy referenced in the given ReleaseLink.
 func (r *ReleaseReconciler) getReleaseStrategy(ctx context.Context, releaseLink *v1alpha1.ReleaseLink) (*v1alpha1.ReleaseStrategy, error) {
+	targetReleaseLink, err := r.getTargetReleaseLink(ctx, releaseLink)
+	if err != nil {
+		return nil, err
+	} else if releaseLink.Spec.ReleaseStrategy == "" {
+		return nil, fmt.Errorf("target ReleaseLink has no associated ReleaseStrategy")
+	}
+
 	releaseStrategy := &v1alpha1.ReleaseStrategy{}
-	err := r.Get(ctx, types.NamespacedName{
-		Namespace: releaseLink.Spec.Target,
-		Name:      releaseLink.Spec.ReleaseStrategy,
+	err = r.Get(ctx, types.NamespacedName{
+		Namespace: targetReleaseLink.Spec.Target,
+		Name:      targetReleaseLink.Spec.ReleaseStrategy,
 	}, releaseStrategy)
 
 	if err != nil {
